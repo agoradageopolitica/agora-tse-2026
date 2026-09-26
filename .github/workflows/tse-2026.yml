@@ -1,0 +1,54 @@
+name: Atualizar candidatos TSE 2026
+
+on:
+  workflow_dispatch:
+
+  schedule:
+    - cron: "0 0,6,12,18 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+
+  atualizar:
+
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Baixar repositório
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Executar atualização do TSE
+        run: |
+          python atualizar-tse.py
+
+      - name: Verificar arquivos gerados
+        run: |
+          echo "Arquivos gerados:"
+          find dados -type f -maxdepth 2 -print
+
+          echo ""
+          echo "Status da atualização:"
+          cat dados/status.json
+
+      - name: Gravar dados atualizados
+        run: |
+
+          git config user.name "Ágora da Geopolítica"
+          git config user.email "agora-da-geopolitica@users.noreply.github.com"
+
+          git add dados/
+
+          if git diff --cached --quiet; then
+            echo "Nenhuma alteração encontrada."
+          else
+            git commit -m "Atualiza candidatos TSE 2026"
+            git push
+          fi
