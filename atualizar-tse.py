@@ -1,456 +1,276 @@
-import csv
-import io
 import json
 import os
 import sys
-import zipfile
+import time
 from datetime import datetime, timezone
 from urllib.request import Request, urlopen
+from urllib.error import HTTPError, URLError
+
+BASE = "https://divulgacandcontas.tse.jus.br/divulga/rest/v1"
+ELEICAO = "20322002026"
+ANO = "2026"
+
+# Códigos de cargo usados pelo sistema de candidaturas do TSE:
+# 1 Presidente, 3 Governador, 5 Senador,
+# 6 Deputado Federal, 7 Deputado Estadual/Distrital.
+CARGOS = {
+    "PRESIDENTE": 1,
+    "GOVERNADOR": 3,
+    "SENADOR": 5,
+    "DEPUTADO FEDERAL": 6,
+    "DEPUTADO ESTADUAL": 7,
+}
+
+UF = os.environ.get("UF", "PB").upper()
+
+OUT = "dados"
+os.makedirs(OUT, exist_ok=True)
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; AgoraDaGeopolitica-TSE2026/1.0)",
+    "Accept": "application/json,text/plain,*/*",
+    "Referer": "https://divulgacandcontas.tse.jus.br/",
+    "Origin": "https://divulgacandcontas.tse.jus.br",
+}
 
 
-# ============================================================
-# ÁGORA DA GEOPOLÍTICA
-# Atualizador de candidatos - Eleições 2026
-# ============================================================
+def requisitar(url):
+    print("\nGET", url)
 
-TSE_URL = (
-    "https://cdn.tse.jus.br/estatistica/sead/odsele/"
-    "consulta_cand/consulta_cand_2026.zip"
-)
-
-OUTPUT_DIR = "dados"
-
-
-def baixar_arquivo(url):
-    print("==============================================")
-    print("ÁGORA DA GEOPOLÍTICA - TSE 2026")
-    print("==============================================")
-    print("URL:")
-    print(url)
-    print()
-    print("Baixando arquivo do TSE...")
-
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 Chrome/153 Safari/537.36"
-        ),
-        "Accept": "*/*",
-        "Accept-Encoding": "identity",
-        "Connection": "close",
-    }
-
-    request = Request(url, headers=headers)
+    req = Request(url, headers=HEADERS, method="GET")
 
     try:
-        with urlopen(request, timeout=120) as response:
+        with urlopen(req, timeout=60) as response:
             status = response.status
-            content_type = response.headers.get("Content-Type", "")
             data = response.read()
 
             print("HTTP:", status)
-            print("Content-Type:", content_type)
-            print("Tamanho:", len(data), "bytes")
+            print("Bytes:", len(data))
 
             if status != 200:
-                raise RuntimeError(
-                    f"O TSE respondeu com HTTP {status}."
-                )
+                raise RuntimeError(f"HTTP {status}")
 
-            if len(data) < 1000:
-                raise RuntimeError(
-                    "O arquivo recebido é muito pequeno. "
-                    "Provavelmente não é o ZIP esperado."
-                )
+            try:
+                return json.loads(data.decode("utf-8"))
+            except UnicodeDecodeError:
+                return json.loads(data.decode("latin-1"))
 
-            return data
+    except HTTPError as e:
+        corpo = ""
+        try:
+            corpo = e.read().decode("utf-8", errors="replace")[:1000]
+        except Exception:
+            pass
+        raise RuntimeError(f"HTTP {e.code} - {corpo}")
 
-    except Exception as e:
-        print()
-        print("ERRO AO ACESSAR O TSE:")
-        print(str(e))
-        raise
-
-
-def localizar_csv(zip_bytes):
-    print()
-    print("Analisando ZIP...")
-
-    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as z:
-        nomes = z.namelist()
-
-        print("Arquivos encontrados:", len(nomes))
-
-        candidatos = []
-
-        for nome in nomes:
-            nome_upper = nome.upper()
-
-            if (
-                nome_upper.endswith(".CSV")
-                and "CONSULTA_CAND" in nome_upper
-            ):
-                candidatos.append(nome)
-
-        if not candidatos:
-            print()
-            print("Arquivos CSV encontrados:")
-
-            for nome in nomes:
-                if nome.upper().endswith(".CSV"):
-                    print(" -", nome)
-
-            raise RuntimeError(
-                "Não foi encontrado o CSV CONSULTA_CAND dentro do ZIP."
-            )
-
-        print()
-        print("CSV selecionado:")
-        print(candidatos[0])
-
-        return z.read(candidatos[0])
+    except URLError as e:
+        raise RuntimeError(f"Erro de rede: {e.reason}")
 
 
-def limpar(valor):
-    if valor is None:
+def buscar_candidatos(unidade, cargo_codigo):
+    # O endpoint oficial do DivulgaCandContas usa a unidade eleitoral
+    # no lugar do município nas eleições gerais de 2026.
+    url = (
+        f"{BASE}/candidatura/listar/"
+        f"{ANO}/{unidade}/{ELEICAO}/{cargo_codigo}/candidatos"
+    )
+
+    return requisitar(url)
+
+
+def extrair_lista(resposta):
+    if isinstance(resposta, list):
+        return resposta
+
+    if isinstance(resposta, dict):
+        for chave in ("candidatos", "content", "data", "items"):
+            valor = resposta.get(chave)
+            if isinstance(valor, list):
+                return valor
+
+    return []
+
+
+def valor(obj, *chaves):
+    if not isinstance(obj, dict):
         return ""
 
-    return str(valor).strip()
-
-
-def encontrar_campo(row, nomes):
-    for nome in nomes:
-        if nome in row:
-            return limpar(row[nome])
+    for chave in chaves:
+        if chave in obj and obj[chave] is not None:
+            return obj[chave]
 
     return ""
 
 
-def converter_csv(csv_bytes):
-    print()
-    print("Convertendo CSV...")
+def normalizar(c, cargo_nome, unidade):
+    cargo_obj = c.get("cargo") if isinstance(c.get("cargo"), dict) else {}
+    partido_obj = c.get("partido") if isinstance(c.get("partido"), dict) else {}
 
-    # Arquivos eleitorais do TSE tradicionalmente utilizam
-    # ISO-8859-1.
-    texto = csv_bytes.decode("latin-1", errors="replace")
-
-    primeira_linha = texto.splitlines()[0]
-
-    if ";" in primeira_linha:
-        delimitador = ";"
-    elif "," in primeira_linha:
-        delimitador = ","
-    else:
-        raise RuntimeError(
-            "Não foi possível identificar o delimitador do CSV."
-        )
-
-    leitor = csv.DictReader(
-        io.StringIO(texto),
-        delimiter=delimitador
-    )
-
-    registros = []
-
-    for linha in leitor:
-
-        registro = {
-            "id": encontrar_campo(
-                linha,
-                ["SQ_CANDIDATO"]
-            ),
-
-            "uf": encontrar_campo(
-                linha,
-                ["SG_UF"]
-            ),
-
-            "cargo": encontrar_campo(
-                linha,
-                ["DS_CARGO"]
-            ),
-
-            "codigo_cargo": encontrar_campo(
-                linha,
-                ["CD_CARGO"]
-            ),
-
-            "numero": encontrar_campo(
-                linha,
-                ["NR_CANDIDATO"]
-            ),
-
-            "nome": encontrar_campo(
-                linha,
-                ["NM_CANDIDATO"]
-            ),
-
-            "nome_urna": encontrar_campo(
-                linha,
-                ["NM_URNA_CANDIDATO"]
-            ),
-
-            "nome_social": encontrar_campo(
-                linha,
-                ["NM_SOCIAL_CANDIDATO"]
-            ),
-
-            "partido": encontrar_campo(
-                linha,
-                ["NM_PARTIDO"]
-            ),
-
-            "sigla_partido": encontrar_campo(
-                linha,
-                ["SG_PARTIDO"]
-            ),
-
-            "numero_partido": encontrar_campo(
-                linha,
-                ["NR_PARTIDO"]
-            ),
-
-            "federacao": encontrar_campo(
-                linha,
-                ["NM_FEDERACAO"]
-            ),
-
-            "sigla_federacao": encontrar_campo(
-                linha,
-                ["SG_FEDERACAO"]
-            ),
-
-            "situacao": encontrar_campo(
-                linha,
-                [
-                    "DS_SITUACAO_CANDIDATURA",
-                    "DS_SITUACAO_CANDIDATO_PLEITO"
-                ]
-            ),
-
-            "detalhe_situacao": encontrar_campo(
-                linha,
-                [
-                    "DS_DETALHE_SITUACAO_CAND",
-                    "DS_DETALHE_SITUACAO_CANDIDATO"
-                ]
-            ),
-
-            "inserido_urna": encontrar_campo(
-                linha,
-                ["ST_CANDIDATO_INSERIDO_URNA"]
-            ),
-
-            "foto": ""
-        }
-
-        # Não precisamos guardar linhas sem identificador.
-        if not registro["id"]:
-            continue
-
-        registros.append(registro)
-
-    print("Candidaturas encontradas:", len(registros))
-
-    if not registros:
-        raise RuntimeError(
-            "O CSV foi lido, mas nenhuma candidatura foi encontrada."
-        )
-
-    return registros
+    return {
+        "id": str(valor(c, "id", "sq_CANDIDATO")),
+        "uf": str(valor(c, "ufCandidatura", "sg_UE") or unidade).upper(),
+        "cargo": str(
+            valor(c, "ds_CARGO", "descricaoCargo")
+            or valor(cargo_obj, "descricao", "nome")
+            or cargo_nome
+        ),
+        "codigo_cargo": cargo_obj.get("codigo") or CARGOS[cargo_nome],
+        "numero": str(valor(c, "numero", "nr_CANDIDATO")),
+        "nome": str(valor(c, "nomeCompleto", "nm_CANDIDATO")),
+        "nome_urna": str(valor(c, "nomeUrna", "nm_URNA")),
+        "nome_social": str(valor(c, "nomeSocial")),
+        "partido": str(
+            valor(c, "nm_PARTIDO")
+            or valor(partido_obj, "nome")
+        ),
+        "sigla_partido": str(
+            valor(c, "sg_PARTIDO")
+            or valor(partido_obj, "sigla")
+        ),
+        "numero_partido": str(
+            valor(partido_obj, "numero")
+        ),
+        "situacao": str(
+            valor(c, "descricaoSituacao", "situacaoCandidato")
+        ),
+        "situacao_totalizacao": str(
+            valor(c, "descricaoTotalizacao")
+        ),
+        "foto": str(
+            valor(c, "fotoUrl", "urlFoto")
+        ),
+        "id_superior": str(
+            valor(c, "idCandidatoSuperior", "sq_CANDIDATO_SUPERIOR")
+        ),
+    }
 
 
-def gerar_arquivos(registros):
+def salvar(nome, dados):
+    caminho = os.path.join(OUT, nome)
 
-    print()
-    print("Gerando arquivos JSON...")
-
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-    # --------------------------------------------------------
-    # Arquivo completo
-    # --------------------------------------------------------
-
-    caminho_completo = os.path.join(
-        OUTPUT_DIR,
-        "candidatos.json"
-    )
-
-    with open(
-        caminho_completo,
-        "w",
-        encoding="utf-8"
-    ) as arquivo:
-
+    with open(caminho, "w", encoding="utf-8") as f:
         json.dump(
-            registros,
-            arquivo,
+            dados,
+            f,
             ensure_ascii=False,
             separators=(",", ":")
         )
 
-    # --------------------------------------------------------
-    # Arquivos por UF
-    # --------------------------------------------------------
-
-    por_uf = {}
-
-    for candidato in registros:
-
-        uf = candidato["uf"].upper()
-
-        if not uf:
-            continue
-
-        por_uf.setdefault(uf, [])
-        por_uf[uf].append(candidato)
-
-    for uf, candidatos in por_uf.items():
-
-        caminho = os.path.join(
-            OUTPUT_DIR,
-            f"{uf}.json"
-        )
-
-        with open(
-            caminho,
-            "w",
-            encoding="utf-8"
-        ) as arquivo:
-
-            json.dump(
-                candidatos,
-                arquivo,
-                ensure_ascii=False,
-                separators=(",", ":")
-            )
-
-    # --------------------------------------------------------
-    # Arquivos por UF + cargo
-    # --------------------------------------------------------
-
-    por_uf_cargo = {}
-
-    for candidato in registros:
-
-        uf = candidato["uf"].upper()
-
-        cargo = candidato["cargo"].upper()
-
-        if not uf or not cargo:
-            continue
-
-        chave = (uf, cargo)
-
-        por_uf_cargo.setdefault(chave, [])
-        por_uf_cargo[chave].append(candidato)
-
-    for (uf, cargo), candidatos in por_uf_cargo.items():
-
-        cargo_slug = (
-            cargo
-            .replace(" ", "_")
-            .replace("/", "_")
-            .replace("\\", "_")
-            .replace("Á", "A")
-            .replace("À", "A")
-            .replace("Ã", "A")
-            .replace("Â", "A")
-            .replace("É", "E")
-            .replace("Ê", "E")
-            .replace("Í", "I")
-            .replace("Ó", "O")
-            .replace("Ô", "O")
-            .replace("Õ", "O")
-            .replace("Ú", "U")
-            .replace("Ç", "C")
-        )
-
-        caminho = os.path.join(
-            OUTPUT_DIR,
-            f"{uf}-{cargo_slug}.json"
-        )
-
-        with open(
-            caminho,
-            "w",
-            encoding="utf-8"
-        ) as arquivo:
-
-            json.dump(
-                candidatos,
-                arquivo,
-                ensure_ascii=False,
-                separators=(",", ":")
-            )
-
-    # --------------------------------------------------------
-    # Metadados
-    # --------------------------------------------------------
-
-    agora = datetime.now(
-        timezone.utc
-    ).isoformat()
-
-    metadados = {
-        "fonte": "Tribunal Superior Eleitoral",
-        "eleicao": 2026,
-        "atualizado_em": agora,
-        "total_candidaturas": len(registros),
-        "ufs": sorted(por_uf.keys()),
-        "quantidade_ufs": len(por_uf),
-        "arquivo_fonte": "consulta_cand_2026.zip"
-    }
-
-    with open(
-        os.path.join(
-            OUTPUT_DIR,
-            "status.json"
-        ),
-        "w",
-        encoding="utf-8"
-    ) as arquivo:
-
-        json.dump(
-            metadados,
-            arquivo,
-            ensure_ascii=False,
-            indent=2
-        )
-
-    print()
-    print("==============================================")
-    print("PROCESSAMENTO CONCLUÍDO")
-    print("==============================================")
-    print("Total:", len(registros))
-    print("UFs:", len(por_uf))
-    print("Atualização:", agora)
-    print()
+    print("Gerado:", caminho, "->", len(dados), "registros")
 
 
 def main():
+    print("=" * 60)
+    print("ÁGORA DA GEOPOLÍTICA - API TSE / DIVULGACANDCONTAS")
+    print("=" * 60)
+    print("Eleição:", ELEICAO)
+    print("UF:", UF)
 
-    try:
+    todos = []
 
-        zip_bytes = baixar_arquivo(TSE_URL)
+    # Presidente é nacional.
+    tarefas = [
+        ("BR", "PRESIDENTE"),
+        (UF, "GOVERNADOR"),
+        (UF, "SENADOR"),
+        (UF, "DEPUTADO FEDERAL"),
+        (UF, "DEPUTADO ESTADUAL"),
+    ]
 
-        csv_bytes = localizar_csv(zip_bytes)
+    resultados = {}
 
-        registros = converter_csv(csv_bytes)
+    for unidade, cargo_nome in tarefas:
+        codigo = CARGOS[cargo_nome]
 
-        gerar_arquivos(registros)
+        try:
+            resposta = buscar_candidatos(unidade, codigo)
+            lista = extrair_lista(resposta)
 
-    except Exception as erro:
+            normalizados = [
+                normalizar(c, cargo_nome, unidade)
+                for c in lista
+            ]
 
-        print()
-        print("==============================================")
-        print("FALHA NA ATUALIZAÇÃO")
-        print("==============================================")
-        print(str(erro))
-        print()
+            # Remove registros sem ID.
+            normalizados = [
+                c for c in normalizados if c["id"]
+            ]
 
-        sys.exit(1)
+            resultados[cargo_nome] = normalizados
+            todos.extend(normalizados)
+
+            print(
+                f"{cargo_nome}: {len(normalizados)} candidatos"
+            )
+
+        except Exception as e:
+            print(
+                f"FALHA em {cargo_nome}: {e}"
+            )
+            resultados[cargo_nome] = []
+
+        time.sleep(0.5)
+
+    if not todos:
+        raise RuntimeError(
+            "A API respondeu, mas nenhum candidato foi obtido."
+        )
+
+    # Remove duplicidades por ID.
+    unicos = {}
+    for candidato in todos:
+        unicos[candidato["id"]] = candidato
+
+    todos = list(unicos.values())
+
+    # Arquivo completo.
+    salvar("candidatos.json", todos)
+
+    # Arquivos por cargo.
+    for cargo_nome, lista in resultados.items():
+        slug = (
+            cargo_nome
+            .lower()
+            .replace(" ", "-")
+            .replace("/", "-")
+        )
+        salvar(f"{slug}.json", lista)
+
+    # Arquivo da UF, útil para a interface.
+    salvar(f"{UF}.json", [
+        c for c in todos
+        if c["uf"] == UF or (
+            c["cargo"] == "PRESIDENTE" and UF
+        )
+    ])
+
+    status = {
+        "fonte": "Tribunal Superior Eleitoral - DivulgaCandContas",
+        "eleicao": ELEICAO,
+        "ano": ANO,
+        "uf": UF,
+        "atualizado_em": datetime.now(timezone.utc).isoformat(),
+        "total": len(todos),
+        "quantidades": {
+            cargo: len(lista)
+            for cargo, lista in resultados.items()
+        },
+        "api": BASE,
+    }
+
+    salvar("status.json", status)
+
+    print("\n" + "=" * 60)
+    print("ATUALIZAÇÃO CONCLUÍDA")
+    print("=" * 60)
+    print("Total:", len(todos))
+    print(json.dumps(status["quantidades"], ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        print("\nERRO FATAL:")
+        print(str(e))
+        sys.exit(1)
