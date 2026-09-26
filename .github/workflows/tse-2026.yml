@@ -1,54 +1,197 @@
 name: Atualizar candidatos TSE 2026
 
 on:
-  workflow_dispatch:
+workflow_dispatch:
 
-  schedule:
-    - cron: "0 0,6,12,18 * * *"
+schedule:
+- cron: "0 0,6,12,18 * * *"
 
 permissions:
-  contents: write
+contents: write
 
 jobs:
 
-  atualizar:
+atualizar:
 
-    runs-on: ubuntu-latest
+```
+runs-on: ubuntu-latest
 
-    steps:
+steps:
 
-      - name: Baixar repositório
-        uses: actions/checkout@v4
+  # ============================================================
+  # BAIXAR O REPOSITÓRIO
+  # ============================================================
 
-      - name: Configurar Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
+  - name: Baixar repositório
+    uses: actions/checkout@v4
 
-      - name: Executar atualização do TSE
-        run: |
-          python atualizar-tse.py
+  # ============================================================
+  # DIAGNÓSTICO DO REPOSITÓRIO
+  # ============================================================
 
-      - name: Verificar arquivos gerados
-        run: |
-          echo "Arquivos gerados:"
-          find dados -type f -maxdepth 2 -print
+  - name: Diagnosticar versão do repositório
+    run: |
 
-          echo ""
-          echo "Status da atualização:"
-          cat dados/status.json
+      echo "============================================================"
+      echo "DIAGNÓSTICO - ÁGORA DA GEOPOLÍTICA - TSE 2026"
+      echo "============================================================"
 
-      - name: Gravar dados atualizados
-        run: |
+      echo ""
+      echo "DIRETÓRIO ATUAL:"
+      pwd
 
-          git config user.name "Ágora da Geopolítica"
-          git config user.email "agora-da-geopolitica@users.noreply.github.com"
+      echo ""
+      echo "BRANCH:"
+      git branch --show-current || true
 
-          git add dados/
+      echo ""
+      echo "COMMIT:"
+      git log -1 --oneline
 
-          if git diff --cached --quiet; then
-            echo "Nenhuma alteração encontrada."
-          else
-            git commit -m "Atualiza candidatos TSE 2026"
-            git push
-          fi
+      echo ""
+      echo "ARQUIVO atualizar-tse.py:"
+      ls -lah atualizar-tse.py
+
+      echo ""
+      echo "PRIMEIRAS 40 LINHAS DO SCRIPT:"
+      sed -n '1,40p' atualizar-tse.py
+
+      echo ""
+      echo "============================================================"
+      echo "PROCURANDO URL ANTIGA"
+      echo "============================================================"
+
+      grep -R -n "consulta_cand_2026.zip" . \
+        --exclude-dir=.git \
+        || true
+
+      echo ""
+      echo "============================================================"
+      echo "PROCURANDO API NOVA"
+      echo "============================================================"
+
+      grep -R -n "divulgacandcontas.tse.jus.br" . \
+        --exclude-dir=.git \
+        || true
+
+      echo ""
+      echo "============================================================"
+      echo "PROCURANDO MENSAGEM ANTIGA"
+      echo "============================================================"
+
+      grep -R -n "Baixando arquivo do TSE" . \
+        --exclude-dir=.git \
+        || true
+
+      echo ""
+      echo "============================================================"
+      echo "TODOS OS atualizar-tse.py ENCONTRADOS"
+      echo "============================================================"
+
+      find . -name "atualizar-tse.py" -type f -print
+
+      echo ""
+      echo "============================================================"
+      echo "FIM DO DIAGNÓSTICO"
+      echo "============================================================"
+
+
+  # ============================================================
+  # IMPEDIR EXECUÇÃO DA VERSÃO ANTIGA
+  # ============================================================
+
+  - name: Verificar versão do atualizar-tse.py
+    run: |
+
+      echo "Verificando versão do script..."
+
+      if grep -q "consulta_cand_2026.zip" atualizar-tse.py; then
+        echo ""
+        echo "ERRO: O atualizar-tse.py ainda contém a versão ANTIGA."
+        echo "O script antigo utiliza consulta_cand_2026.zip."
+        echo ""
+        echo "O workflow foi interrompido para evitar executar a versão errada."
+        exit 1
+      fi
+
+      if ! grep -q "divulgacandcontas.tse.jus.br" atualizar-tse.py; then
+        echo ""
+        echo "ERRO: A API nova do DivulgaCandContas não foi encontrada."
+        echo ""
+        echo "O workflow foi interrompido."
+        exit 1
+      fi
+
+      echo ""
+      echo "OK: A versão nova do atualizar-tse.py foi encontrada."
+
+
+  # ============================================================
+  # CONFIGURAR PYTHON
+  # ============================================================
+
+  - name: Configurar Python
+    uses: actions/setup-python@v5
+    with:
+      python-version: "3.12"
+
+
+  # ============================================================
+  # EXECUTAR ATUALIZAÇÃO
+  # ============================================================
+
+  - name: Executar atualização do TSE
+    run: |
+
+      echo "============================================================"
+      echo "EXECUTANDO atualizar-tse.py"
+      echo "============================================================"
+
+      python atualizar-tse.py
+
+
+  # ============================================================
+  # VERIFICAR ARQUIVOS GERADOS
+  # ============================================================
+
+  - name: Verificar arquivos gerados
+    run: |
+
+      echo "============================================================"
+      echo "ARQUIVOS GERADOS"
+      echo "============================================================"
+
+      find dados -maxdepth 2 -type f -print
+
+      echo ""
+      echo "============================================================"
+      echo "STATUS DA ATUALIZAÇÃO"
+      echo "============================================================"
+
+      if [ -f dados/status.json ]; then
+        cat dados/status.json
+      else
+        echo "ERRO: dados/status.json não foi gerado."
+        exit 1
+      fi
+
+
+  # ============================================================
+  # GRAVAR DADOS ATUALIZADOS
+  # ============================================================
+
+  - name: Gravar dados atualizados
+    run: |
+
+      git config user.name "Ágora da Geopolítica"
+      git config user.email "agora-da-geopolitica@users.noreply.github.com"
+
+      git add dados/
+
+      if git diff --cached --quiet; then
+        echo "Nenhuma alteração encontrada."
+      else
+        git commit -m "Atualiza candidatos TSE 2026"
+        git push
+      fi
+```
